@@ -1,0 +1,192 @@
+****** in .env ****************
+GOOGLE_MAPS_API_KEY=AIzaSyC8khia7fVlC15V_xjUllIwkEvGgBaIZIo
+
+******** in controller **********************
+
+public function getNearbyPlaceTypes(Request $request)
+{
+    //  Step 1: Validation
+    $request->validate([
+        'latitude' => 'required|numeric',
+        'longitude' => 'required|numeric',
+    ]);
+
+    //  Step 2: Inputs
+    $latitude = $request->latitude;
+    $longitude = $request->longitude;
+    $radius = $request->radius ?? 1000; // meters
+    $type = $request->type ?? '';
+    $apiKey = env('GOOGLE_MAPS_API_KEY');
+
+    //  Step 3: Google Places API Call
+    $response = Http::get('https://maps.googleapis.com/maps/api/place/nearbysearch/json', [
+        'location' => "{$latitude},{$longitude}",
+        'radius' => $radius,
+        'type' => $type,
+        'key' => $apiKey,
+    ]);
+ 
+    $data = $response->json();
+
+    if (!isset($data['results']) || $data['status'] !== 'OK') {
+        return response()->json([
+            'success' => false,
+            'message' => $data['error_message'] ?? 'No nearby places found.',
+        ]);
+    }
+
+    //  Step 4: Get All Place IDs from Playlist (split comma separated)
+    $playlistPlaces = Playlist::pluck('place_id')->toArray();
+
+    $allPlaylistIds = [];
+    foreach ($playlistPlaces as $ids) {
+        $splitIds = explode(',', $ids);
+        foreach ($splitIds as $id) {
+            $trimmed = trim($id);
+            if (!empty($trimmed)) {
+                $allPlaylistIds[] = $trimmed;
+            }
+        }
+    }
+
+    // Remove duplicates
+    $allPlaylistIds = array_unique($allPlaylistIds);
+
+    //  Step 5: Get API place IDs
+    $apiPlaceIds = [];
+    foreach ($data['results'] as $place) {
+        if (isset($place['place_id'])) {
+            $apiPlaceIds[] = $place['place_id'];
+        }
+    }
+ 
+   //  Step 6: Find common IDs
+$matchedIds = array_intersect($allPlaylistIds, $apiPlaceIds);
+
+//  Step 7: Get matching places from database (with type filter)
+$matchedPlaces = Place::whereIn('place_id', $matchedIds)
+    ->where(function ($query) use ($type) {
+        $query->where('types', 'LIKE', "%{$type}%");
+    })
+    ->get();
+
+    //  Step 8: Response
+    return response()->json([
+        'success' => true,
+        'totalMatches' => $matchedPlaces->count(),
+        'matched_place_ids' => array_values($matchedIds),
+        'places' => $matchedPlaces,
+    ]);
+}
+
+******************* APIS Haris Provided to me flutter *****************
+class ApiConfig {
+  // TODO: Replace with your actual Google Places API key
+  // You can get this from Google Cloud Console -> APIs & Services -> Credentials
+  // static const String googlePlacesApiKey = 'AIzaSyAqX0QEuR6PVYLQzZZ5UXtzPS9xsJP8D58';
+    static const String googlePlacesApiKey = 'AIzaSyC8khia7fVlC15V_xjUllIwkEvGgBaIZIo';
+
+  
+  // Google Places API endpoints
+  static const String placesNearbySearchUrl = 'https://maps.googleapis.com/maps/api/place/nearbysearch/json';
+  static const String placesDetailsUrl = 'https://maps.googleapis.com/maps/api/place/details/json';
+  static const String placesPhotoUrl = 'https://maps.googleapis.com/maps/api/place/photo';
+
+  static const String placesAutocompleteUrl = 'https://maps.googleapis.com/maps/api/place/autocomplete/json';
+  static const String distanceMatrixUrl = 'https://maps.googleapis.com/maps/api/distancematrix/json';
+}
+
+
+
+
+Future<void> fetchNearbyPlaces(
+    String placeType,
+  ) async {
+    setState(() {
+      _isLoading = true;
+      _currentPlaceType = placeType;
+    });
+    try {
+      print('🔍 Searching for nearby $placeType');
+      final String url =
+          '${ApiConfig.placesNearbySearchUrl}?location=${_initialPosition.latitude},${_initialPosition.longitude}'
+          '&radius=1000'
+          '&type=$placeType'
+          '&key=${ApiConfig.googlePlacesApiKey}';
+      print('🌐 Making API request to: $url');
+      final response = await http.get(Uri.parse(url));
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        print("Response Fetch Resturant $data");
+        if (data['status'] == 'OK') {
+          final results = data['results'] as List;
+          print('✅ Found ${results.length} $placeType places');
+          List<RestaurantModel> restaurants = [];
+          Set<gmaps.Marker> markers = {};
+          for (int i = 0; i < results.length; i++) {
+            final place = results[i];
+            final restaurant = RestaurantModel.fromGooglePlace(place);
+            final detailedRestaurant = restaurant.placeId != null
+                ? await _fetchRestaurantDetails(restaurant.placeId!)
+                : null;
+            if (detailedRestaurant != null) {
+              restaurants.add(detailedRestaurant);
+            } else {
+              restaurants.add(restaurant);
+            }
+            if (restaurant.latitude != null && restaurant.longitude != null) {
+              final markerColor = _getMarkerColor(restaurant.rating);
+              final marker = gmaps.Marker(
+                markerId: gmaps.MarkerId('restaurant_$i'),
+                position:
+                    gmaps.LatLng(restaurant.latitude!, restaurant.longitude!),
+                infoWindow: gmaps.InfoWindow(
+                    title: restaurant.name ?? 'Unknown Restaurant',
+                    snippet:
+                        'Rating: ${restaurant.rating ?? 'N/A'} | ${restaurant.priceLevel ?? 'N/A'}'),
+                icon: gmaps.BitmapDescriptor.defaultMarkerWithHue(markerColor),
+                onTap: () => _onMarkerTap('restaurant_$i'),
+              );
+              markers.add(marker);
+            }
+            print(
+                '📍 Created marker $i: ${restaurant.name} at ${restaurant.latitude}, ${restaurant.longitude}');
+            print('🍽️ Restaurant ${i + 1}:');
+            print(restaurant.toString());
+          }
+          setState(() {
+            _restaurants = restaurants;
+            _markers = markers;
+          });
+          _updateSearchController();
+          if (widget.onRestaurantsLoaded != null) {
+            widget.onRestaurantsLoaded!(restaurants);
+          }
+          print('📊 Total $placeType places loaded: ${restaurants.length}');
+          print('📋 Places list updated in state');
+          print('🗺️ All $placeType places displayed on map with markers');
+          print('🎯 Markers count: ${_markers.length}');
+          print(
+              '📍 First marker position: ${_markers.isNotEmpty ? _markers.first.position : 'No markers'}');
+          if (markers.isNotEmpty && mapController != null) {
+            fitMarkersInView();
+          }
+        } else {
+          print('❌ API Error: ${data['status']}');
+          print('Error message: ${data['error_message'] ?? 'Unknown error'}');
+        }
+      } else {
+        print('❌ HTTP Error: ${response.statusCode}');
+        print('Response: ${response.body}');
+      }
+    } catch (e) {
+      print('❌ Exception while fetching restaurants: $e');
+    } finally {
+      setState(() {
+        _isLoading = false;
+      });
+    }
+  }
+
+
+
